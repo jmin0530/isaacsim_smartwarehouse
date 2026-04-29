@@ -1,80 +1,99 @@
+import os
 import rclpy
 import numpy as np
-from .base_action import BaseAction
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 from ultralytics import YOLO
 
-class YoloDetectAction(BaseAction):
-    def __init__(self, node, dr):
-        super().__init__()
-        self.node = node
-        self.dr = dr
-        self.model = YOLO('/home/rokey/IsaacSim-ros_workspaces/humble_ws/src/smartwarehouse/best.pt')
 
-        self.rgb_msg = None
-        self.rgb_sub = self.node.create_subscription(Image, "/rgb", self.rgb_callback, 10)
-        self.result_pub = self.node.create_publisher(Image, "/yolo_labeled", 10)
+SENSOR_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=10,
+)
 
-    # -------------------- 콜백 --------------------
-    def rgb_callback(self, msg):
-        self.rgb_msg = msg
 
-    # -------------------- 실행 --------------------
-    def execute(self):
-        self.node.get_logger().info("YoloAction init")
+class YoloNode(Node):
+    def __init__(self):
+        super().__init__("yolo_detector")
+        weights = os.environ.get("YOLO_WEIGHTS")
+        if not weights:
+            raise RuntimeError("YOLO_WEIGHTS env var not set")
+        self.get_logger().info(f"Loading YOLO weights: {weights}")
+        self.model = YOLO(weights)
 
-        while rclpy.ok():
-            rclpy.spin_once(self.node, timeout_sec=0.1)
-            if self.rgb_msg:
-                break
+        self.rgb_sub = self.create_subscription(Image, "/rgb", self.on_rgb, SENSOR_QOS)
+        self.result_pub = self.create_publisher(Image, "/yolo_labeled", SENSOR_QOS)
+        self._frame_count = 0
+        self.get_logger().info("subscription + publisher ready, waiting for /rgb...")
 
-        rgb_img = self.ros_image_to_numpy(self.rgb_msg)
+    def on_rgb(self, msg: Image):
+        rgb = self._ros_to_numpy(msg)
+        results = self.model(rgb, verbose=False)
 
-        # YOLO 추론
-        results = self.model(rgb_img, verbose=False)
+        self._frame_count += 1
+        if self._frame_count <= 3 or self._frame_count % 30 == 1:
+            self.get_logger().info(f"frame {self._frame_count}: {len(results[0].boxes) if results else 0} detections")
 
-        # 이미지 복사
-        annotated_img = rgb_img.copy()
-
-        # 바운딩 박스 + 라벨 그리기
+        annotated = rgb.copy()
         for r in results:
-            for box, conf, cls in zip(r.boxes.xyxy.tolist(), r.boxes.conf.tolist(), r.boxes.cls.tolist()):
+            for box, conf, cls in zip(r.boxes.xyxy.tolist(),
+                                     r.boxes.conf.tolist(),
+                                     r.boxes.cls.tolist()):
                 label = self.model.names[int(cls)]
                 x1, y1, x2, y2 = map(int, box)
-                self.draw_rectangle(annotated_img, x1, y1, x2, y2,color=(255,0,0))
-                self.draw_label(annotated_img, x1, y1, f"{label}:{conf:.2f}")
+                self._draw_rect(annotated, x1, y1, x2, y2, color=(255, 0, 0))
+                self._draw_label(annotated, x1, y1, f"{label}:{conf:.2f}")
 
-        # 퍼블리시
-        self.publish_result(annotated_img)
+        self._publish(annotated)
 
-    # -------------------- 유틸 --------------------
-    def ros_image_to_numpy(self, msg):
-        dtype = np.uint8
-        channels = 3
-        np_arr = np.frombuffer(msg.data, dtype=dtype).reshape((msg.height, msg.width, channels))
-        return np_arr
+    @staticmethod
+    def _ros_to_numpy(msg: Image) -> np.ndarray:
+        return np.frombuffer(msg.data, dtype=np.uint8).reshape(
+            (msg.height, msg.width, 3)
+        )
 
-    def draw_rectangle(self, img, x1, y1, x2, y2, color=(255, 255, 255), thickness=1):
-        img[y1:y1+thickness, x1:x2] = color  # top
-        img[y2-thickness:y2, x1:x2] = color  # bottom
-        img[y1:y2, x1:x1+thickness] = color  # left
-        img[y1:y2, x2-thickness:x2] = color  # right
+    @staticmethod
+    def _draw_rect(img, x1, y1, x2, y2, color=(255, 255, 255), thickness=1):
+        img[y1:y1 + thickness, x1:x2] = color
+        img[y2 - thickness:y2, x1:x2] = color
+        img[y1:y2, x1:x1 + thickness] = color
+        img[y1:y2, x2 - thickness:x2] = color
 
-    def draw_label(self, img, x, y, text, color=(255, 255, 255)):
-        # 글자는 numpy만으로 표현 어렵기 때문에, 텍스트 영역을 색 블록으로 표시
+    @staticmethod
+    def _draw_label(img, x, y, text, color=(255, 255, 255)):
         h, w = img.shape[:2]
-        box_w, box_h = min(len(text)*6, w-x), 10
-        x2, y2 = x+box_w, y+box_h
-        img[y:y2, x:x2] = color  # 배경 색 블록
-        # 글자 생략 (numpy만 사용 시) 대신 영역 표시
+        box_w = min(len(text) * 6, w - x)
+        box_h = 10
+        img[y:y + box_h, x:x + box_w] = color
 
-    def publish_result(self, np_img):
-        img_msg = Image()
-        img_msg.header.stamp = self.node.get_clock().now().to_msg()
-        img_msg.header.frame_id = "camera"
-        img_msg.height, img_msg.width = np_img.shape[:2]
-        img_msg.encoding = "rgb8"
-        img_msg.is_bigendian = 0
-        img_msg.step = np_img.shape[1] * 3
-        img_msg.data = np_img.tobytes()
-        self.result_pub.publish(img_msg)
+    def _publish(self, np_img: np.ndarray):
+        msg = Image()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "camera"
+        msg.height, msg.width = np_img.shape[:2]
+        msg.encoding = "rgb8"
+        msg.is_bigendian = 0
+        msg.step = np_img.shape[1] * 3
+        msg.data = np_img.tobytes()
+        self.result_pub.publish(msg)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = YoloNode()
+    try:
+        # spin_once loop instead of rclpy.spin() — the latter fails to dispatch
+        # callbacks when paired with rmw_cyclonedds_cpp + ros-humble in this image.
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

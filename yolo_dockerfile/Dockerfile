@@ -1,14 +1,20 @@
-# 1. NVIDIA CUDA + Ubuntu 22.04 기반 (기존 유지)
+# NVIDIA CUDA + Ubuntu 22.04 (matches host ROS 2 Humble Python 3.10)
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 
-# 2. 필수 시스템 패키지 설치
-# libgl1-mesa-glx 및 libqt5gui5 등 GUI 관련 라이브러리 추가
-RUN apt-get update && apt-get install -y \
+# System deps + ROS 2 apt source prerequisites
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     git \
+    curl \
+    gnupg \
+    lsb-release \
+    software-properties-common \
+    ca-certificates \
     libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
@@ -17,18 +23,33 @@ RUN apt-get update && apt-get install -y \
     libqt5gui5 \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. pip 업그레이드 및 의존성 패키지 설치
-RUN pip3 install --upgrade pip
+# ROS 2 Humble apt source (official method, docs.ros.org)
+RUN add-apt-repository universe \
+    && curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+        -o /usr/share/keyrings/ros-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
+        > /etc/apt/sources.list.d/ros2.list
 
-# [핵심] 의존성 충돌 해결: numpy 버전을 2.0 미만으로 강제 고정
-# ultralytics 설치 시 자동으로 numpy 최신버전이 깔리는 것을 방지하기 위해 먼저 설치하거나 명시합니다.
-RUN pip3 install --no-cache-dir "numpy<2"
-RUN pip3 install --no-cache-dir ultralytics opencv-python scipy
+# ROS 2 Humble base (provides rclpy) + CycloneDDS RMW.
+# CycloneDDS is required: FastDDS shared memory transport breaks across
+# container boundary even with --ipc host (verified 2026-04-29).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ros-humble-ros-base \
+    ros-humble-rmw-cyclonedds-cpp \
+    && rm -rf /var/lib/apt/lists/*
 
-# 4. ROS2와 연동할 경우 cv_bridge 등 추가 (선택 사항)
-# RUN pip3 install cv_bridge 
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+# Python deps — ultralytics + torch resolve numpy automatically (numpy 2.x supported)
+RUN pip3 install --upgrade pip \
+    && pip3 install --no-cache-dir ultralytics opencv-python scipy
 
 WORKDIR /workspace
 
-# 5. 환경 변수 설정 (GUI 렌더링 관련)
 ENV QT_X11_NO_MITSHM=1
+
+# Source ROS 2 setup before exec'ing command
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["bash"]

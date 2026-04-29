@@ -11,7 +11,6 @@ from .creat_tcp import TcpManager
 from .pick2conveyor import PickAction
 from .place2shelf import PlaceAction
 from .move_home import MoveHomeAction
-from .yolo import YoloDetectAction
 from .waypoint import WaypointAction
 
 POSE_PATH = os.path.join(
@@ -37,7 +36,6 @@ def action_build(node, DR, poses):
     return {'pick':lambda target_pose: PickAction(node, dr=DR, poses=poses['Pick'], target_pose=target_pose),
             'place':lambda target_name: PlaceAction(node, dr=DR, poses=poses['Place'], target_name=target_name),
             'home':lambda : MoveHomeAction(node, dr=DR, poses=poses['Home']),
-            'yolo':lambda : YoloDetectAction(node, dr=DR),
             'waypoint':lambda : WaypointAction(node, dr=DR, poses=poses['Waypoint']),
             }
 # ===================================================================================================
@@ -89,9 +87,10 @@ def main():
             actions_build['home']().execute()
             time.sleep(1)
             node.get_logger().info("Home 위치 도달. 물체 인식을 시작합니다.")
-            
-            # Yolo data 확인 =======================================================
-            actions_build['yolo']().execute()
+
+            # YOLO 추론은 별도 컨테이너에서 /rgb -> /yolo_labeled 토픽으로 비동기 동작.
+            # 카메라 워밍업 대기 (sim camera stabilization).
+            time.sleep(2)
             if phase == 1:
                 target_pose = [485.939, 51.106, 105.048, 0.000, -45.000, 0.000]
                 target_name = 'clock'
