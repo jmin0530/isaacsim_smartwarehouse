@@ -55,17 +55,27 @@ A smart warehouse simulation featuring YOLO-based object detection and robot pic
 
 
 ## 시스템 구조(System Architecture)
+
+YOLO 추론은 별도 Docker 컨테이너에서 실행되며, ROS 2 토픽으로 호스트의 메인 컨트롤러와 통신합니다.
+
 ```bash
-Camera (Isaac Sim)
-      ↓
-YOLO Detection
-      ↓
-ROS2 Main Controller
-      ↓
-Doosan Robot API, RG2 Gripper
-      ↓
+Isaac Sim (host)
+      │ /rgb  (sensor_msgs/Image)
+      ▼
+YOLO Detection  ──  Docker container (smartwarehouse-yolo)
+                    RMW: CycloneDDS, QoS: BEST_EFFORT
+      │ /yolo_labeled  (sensor_msgs/Image)
+      ▼
+ROS 2 Main Controller (host)
+      │
+      ▼
+Doosan M0609 + OnRobot RG2  (via DSR API)
+      │
+      ▼
 Pick & Place
 ```
+
+상세 설계 결정은 [`docs/decisions/README.md`](docs/decisions/README.md) (ADR-002 vision-control split, ADR-003 컨테이너 DDS 설정) 참조.
 
 ## 데모 영상
 ![smartwarehouse Demo](docs/demo.gif)
@@ -96,76 +106,116 @@ ros-humble-hardware-interface-testing \
 ros-humble-ament-cmake-clang-format
 ```
 #### Python Libraries
+호스트에는 별도 ML 라이브러리 설치 불필요. YOLO 추론에 필요한 의존성 (`torch`, `ultralytics`, `numpy`, `opencv-python`, `scipy`, `ros-humble-rmw-cyclonedds-cpp`)은 모두 Docker 컨테이너 내부에 격리되며, `./yolo_dockerfile/run.sh build` 시 자동 설치됩니다.
+
+검증된 컨테이너 버전 (2026-04-29): `torch 2.11.0+cu130`, `ultralytics 8.4.42`, `numpy 2.2.6`, `cyclonedds 0.10.5`.
+
+호스트에서 별도 학습/디버깅을 위해 ML 라이브러리가 필요하다면 (선택):
 ```bash
-pip install \
-numpy==1.24.3 \
-opencv-python==4.8.1.78 \
-torch==2.10.0 \
-torchvision==0.25.0 \
-ultralytics==8.4.9 \
-ultralytics-thop==2.0.18
+pip install numpy opencv-python torch torchvision ultralytics
 ```
 --
 ## 폴더 구조 (Folder Structure)
 
 ```bash
-smartwarehouse
-├── config/                   # 인식 및 로봇 설정을 위한 설정 파일 (pose.yaml 등)
-├── dataset/                  # YOLO 모델 학습을 위한 이미지 및 레이블 데이터
-├── launch/                   # ROS2 노드 실행을 위한 런치 파일 (dsr_bringup)
-├── onrobot2/                 # OnRobot 그리퍼(RG2/RG6) 관련 리소스 및 URDF/Mesh
-│   ├── meshes/               # 그리퍼의 3D 모델 파일 (.stl)
-│   ├── urdf/                 # 로봇 결합을 위한 URDF 및 XACRO 설정
-│   └── onrobot/              # Isaac Sim 연동을 위한 USD 설정 파일
+Smartwarehouse
+├── CLAUDE.md                 # 프로젝트 개요 + Hard Rules pointer + Quick Ref
+├── .env.example              # 환경변수 템플릿 (ROS / YOLO / 하드웨어 게이팅)
+├── .claude/                  # Claude Code 협업 인프라 (rules / agents / memory) — Claude 사용자 한정
+├── config/                   # 인식 및 로봇 설정 파일 (pose.yaml 등)
+├── docs/
+│   ├── DEVELOPMENT_ROADMAP.md
+│   ├── TROUBLESHOOTING.md
+│   ├── ENVIRONMENTBUILD.md
+│   ├── decisions/            # ADR-001~003 (스택 결정, vision-control split, 컨테이너 DDS 설정)
+│   └── harness-tests.md      # 프로젝트 Tier 0 violation 테스트 결과
+├── launch/                   # ROS 2 launch 파일 (dsr_bringup)
+├── onrobot2/                 # OnRobot 그리퍼(RG2/RG6) 리소스
+│   ├── meshes/               # 3D 모델 (.stl)
+│   ├── urdf/                 # URDF / XACRO
+│   └── onrobot/              # Isaac Sim 연동 USD
 ├── smartwarehouse/           # 핵심 소스 코드 (Main Logic)
-│   ├── main_controller.py    # 전체 시스템 제어 메인 루프
-│   ├── base_action.py        # 로봇 기본 동작 정의
-│   ├── gripper_controller.py # OnRobot 그리퍼 제어 로직
-│   ├── yolo.py               # 객체 인식 추론 스크립트
-│   └── replicator_script.py  # Isaac Sim Replicator 데이터 생성 스크립트
-├── USD/                      # Isaac Sim 프로젝트 파일 (.usd)
-│   ├── m0609_rg2_final.usd   # 두산 M0609 + RG2 그리퍼 통합 모델
-│   └── smartwarehouse.usd    # 스마트 물류 창고 환경 씬(Scene)
-├── yolo_dockerfile/          # yolo 환경 구축을 위한 Dockerfile
-└── best.pt                   # YOLOv8 학습 완료 모델 가중치 (best.pt 등)
+│   ├── main_controller.py    # 제어 메인 루프
+│   ├── base_action.py        # 로봇 기본 동작
+│   ├── gripper_controller.py # OnRobot 그리퍼 제어
+│   ├── yolo.py               # YOLO 검출 ROS 2 노드 (컨테이너 안에서 실행)
+│   └── replicator_script.py  # Isaac Sim Replicator 데이터셋 생성
+├── USD/                      # Isaac Sim 씬 (.usd)
+│   ├── m0609_rg2_final.usd   # M0609 + RG2 통합 모델
+│   └── smartwarehouse.usd    # 창고 환경 씬
+├── yolo_dockerfile/          # YOLO 추론 컨테이너 자산
+│   ├── Dockerfile            # CUDA + ROS 2 Humble + ultralytics + CycloneDDS
+│   ├── entrypoint.sh         # ROS 2 setup 후 python을 bash child로 실행
+│   ├── run.sh                # build / run / shell 헬퍼
+│   └── install_docker.sh     # 호스트 Docker + nvidia-container-toolkit 셋업
+└── best.pt                   # YOLOv8 학습 가중치
 ```
 
 ## 설치 및 빌드 (Installation & Build)
+
 #### 1. 저장소 클론
 ```bash
 git clone https://github.com/isaac-sim/IsaacSim-ros_workspaces.git
-cd IsaacSim_ros-workspaces/humble/src
+cd IsaacSim-ros_workspaces/humble/src
 git clone https://github.com/DoosanRobotics/doosan-robot2.git
-git clone https://github.com/username/Smartwarehouse.git
+git clone https://github.com/jmin0530/isaacsim_smartwarehouse.git Smartwarehouse
 ```
+
 #### 2. Doosan emulator install
-- [doosan-robot2 git link](#https://github.com/DoosanRobotics/)
-#### 2. ROS2 빌드 (Workspace)
+- [doosan-robot2 git link](https://github.com/DoosanRobotics/)
+
+#### 3. ROS 2 워크스페이스 빌드
 ```bash
 cd ~/IsaacSim-ros_workspaces/humble_ws
 rosdep install -i --from-path src --rosdistro $ROS_DISTRO -y
-colcon build
+colcon build --packages-select smartwarehouse
+source install/setup.bash
+```
+
+#### 4. Docker 호스트 셋업 (one-time)
+호스트에 Docker CE + NVIDIA Container Toolkit이 필요합니다. 이미 깔려있으면 스킵.
+```bash
+cd ~/IsaacSim-ros_workspaces/humble_ws/src/Smartwarehouse/yolo_dockerfile
+./install_docker.sh
+```
+스크립트가 sudo 비밀번호를 요청합니다. 끝나면 새 터미널을 열거나 `newgrp docker`로 그룹 권한을 적용하세요.
+
+#### 5. YOLO 추론 컨테이너 이미지 빌드
+```bash
+./run.sh build   # 첫 빌드 ~10~15분 (cuDNN runtime + ROS 2 Humble + ultralytics)
 ```
 
 ## 실행 방법 (How to run)
 
+총 4개의 터미널이 필요합니다 (Isaac Sim → DSR control → YOLO 컨테이너 → main controller).
+
 #### 1. Isaac Sim 실행 및 프로젝트 열기
 ```bash
-# isaac sim 실행
+# Isaac Sim 실행
 ./isaacsim/isaac-sim.sh
-# Isaac Sim에서 아래 USD 파일 열기
-/home/rokey/IsaacSim-ros_workspaces/humble_ws/src/smartwarehouse/USD/smartwarehouse.usd 
+# Isaac Sim에서 USD 파일 열기 후 Play 버튼 누르기
+~/IsaacSim-ros_workspaces/humble_ws/src/Smartwarehouse/USD/smartwarehouse.usd
 ```
-#### 2. 실행 환경 설정 및 DRL control node 켜기
+
+#### 2. DSR control node 실행
 ```bash
-#새 터미널에서
+# 새 터미널
 source ~/IsaacSim-ros_workspaces/humble_ws/install/setup.bash
 source /opt/ros/humble/setup.bash
 ros2 launch smartwarehouse dsr_bringup.launch.py
 ```
-#### 3. 실행 환경 설정 및 main controller 실행
+
+#### 3. YOLO 추론 컨테이너 실행
 ```bash
-# 새 터미널에서
+# 새 터미널 (호스트)
+cd ~/IsaacSim-ros_workspaces/humble_ws/src/Smartwarehouse
+./yolo_dockerfile/run.sh run
+```
+컨테이너는 `/rgb`를 구독해 추론하고 `/yolo_labeled`로 결과를 publish합니다. 인터랙티브 디버깅이 필요하면 `./yolo_dockerfile/run.sh shell`.
+
+#### 4. Main controller 실행
+```bash
+# 새 터미널
 source ~/IsaacSim-ros_workspaces/humble_ws/install/setup.bash
 source /opt/ros/humble/setup.bash
 ros2 run smartwarehouse main
@@ -196,7 +246,11 @@ ros2 run smartwarehouse main
 - 2.3  : YOLO training with Docker
 - 2.4  : Test best.pt with Docker 
 - 2.5  : Action test
-- 2.6  : README.md update 
+- 2.6  : README.md update
+- 2.7  : Move YOLO inference into Docker container (CycloneDDS RMW)
+- 2.8  : Add project documentation and ADRs (CLAUDE.md, ROADMAP, decisions/)
+- 2.9  : Add Claude Code project harness (.claude/)
+- 2.10 : README update for vision-control split
 
 ## Reference
 #### 참고 문헌 (Reference)
